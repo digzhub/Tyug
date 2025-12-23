@@ -40,6 +40,20 @@ const NETWORKS = [
   { name: 'Arbitrum One', rpc: 'https://arb1.arbitrum.io/rpc', chainId: 42161 },
 ];
 
+// Re-defining global AIStudio interface to resolve merge conflicts with ambient types.
+// FIX: Removed readonly from aistudio to match identical modifiers in potential existing browser declarations.
+declare global {
+  interface AIStudio {
+    hasSelectedApiKey: () => Promise<boolean>;
+    openSelectKey: () => Promise<void>;
+  }
+  interface Window {
+    aistudio: AIStudio;
+  }
+}
+
+const STORAGE_KEY = 'ether_node_discovered_wallets';
+
 export default function App() {
   // State
   const [wallets, setWallets] = useState<WalletEntry[]>([]);
@@ -64,6 +78,9 @@ export default function App() {
   const [quantumCalibration, setQuantumCalibration] = useState(0); 
   const [showCollisionAlert, setShowCollisionAlert] = useState(false);
   const [lastDiscovery, setLastDiscovery] = useState<WalletEntry | null>(null);
+  const [isKeySelected, setIsKeySelected] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [vaultSyncing, setVaultSyncing] = useState(false);
 
   // Refs
   const isScanningRef = useRef(false);
@@ -71,6 +88,41 @@ export default function App() {
   const providerRef = useRef<ethers.JsonRpcProvider | null>(null);
   const attemptsRef = useRef(0);
   const discoveryLockRef = useRef(false);
+
+  // Persistence Logic: Load from LocalStorage on mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          setDiscovered(parsed);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to load vault from localStorage:", e);
+    }
+  }, []);
+
+  // Persistence Logic: Auto-save when discovered list updates
+  useEffect(() => {
+    if (discovered.length > 0) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(discovered));
+    }
+  }, [discovered]);
+
+  const handleManualSave = () => {
+    setVaultSyncing(true);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(discovered));
+    setTimeout(() => setVaultSyncing(false), 1000);
+  };
+
+  const clearVault = () => {
+    if (window.confirm("Are you sure you want to purge all discovered wallet data from the local vault?")) {
+      localStorage.removeItem(STORAGE_KEY);
+      setDiscovered([]);
+    }
+  };
 
   // Helper: Block Explorer
   const getExplorerUrl = useCallback((address: string) => {
@@ -81,6 +133,21 @@ export default function App() {
     const domain = chains[nodeStatus.chainId] || "blockscan.com";
     return `https://${domain}/address/${address}`;
   }, [nodeStatus.chainId]);
+
+  // API Key Check
+  useEffect(() => {
+    const checkKey = async () => {
+      const hasKey = await window.aistudio.hasSelectedApiKey();
+      setIsKeySelected(hasKey);
+    };
+    checkKey();
+  }, []);
+
+  const handleOpenKeySelector = async () => {
+    await window.aistudio.openSelectKey();
+    setIsKeySelected(true);
+    setAuthError(null);
+  };
 
   // HVT Monitor Logic
   const syncHvtBalances = useCallback(async () => {
@@ -190,8 +257,18 @@ export default function App() {
 
   const runAnalysis = async () => {
     const context = `CALIBRATION: ${quantumCalibration}%. STATUS: Guaranteed Hit Imminent. User seeking 100% find with real balance verification. Analyzing keyspace tunneling convergence. Resonance: ${luckActive ? 'CRITICAL' : 'OPTIMAL'}.`;
-    const audit = await auditWalletSetup(context, () => {});
-    setProbabilityData(audit);
+    try {
+      const audit = await auditWalletSetup(context, () => {});
+      setProbabilityData(audit);
+      setAuthError(null);
+    } catch (err: any) {
+      console.error("Analysis Error:", err);
+      // FIX: Added handling for "Requested entity was not found" as per guidelines
+      if (err.message?.includes("permission") || err.message?.includes("403") || err.message?.includes("Requested entity was not found")) {
+        setAuthError("PERMISSION_DENIED: Engine Authorization Required.");
+        setIsKeySelected(false);
+      }
+    }
   };
 
   const startScanLoop = useCallback(async () => {
@@ -229,7 +306,6 @@ export default function App() {
     setTimeout(() => setLuckActive(false), 12000);
   };
 
-  // Fix toggleReveal missing error by adding the function
   const toggleReveal = (id: string) => {
     setRevealMap(prev => ({ ...prev, [id]: !prev[id] }));
   };
@@ -249,6 +325,45 @@ export default function App() {
             <p className="text-[10px] text-neutral-600 font-bold uppercase tracking-[0.4em] mb-10">Quantum Discovery v8.0</p>
             
             <div className="space-y-6">
+              {/* AUTHENTICATION STATUS */}
+              <div className="p-4 bg-black/40 border border-neutral-800 rounded-2xl space-y-3">
+                <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-neutral-500 font-black uppercase tracking-widest">Auth Status</span>
+                    <span className={`text-[10px] font-black uppercase tracking-tighter ${isKeySelected ? 'text-green-500' : 'text-red-500'}`}>
+                        {isKeySelected ? 'VALID_KEY' : 'UNAUTHORIZED'}
+                    </span>
+                </div>
+                {!isKeySelected && (
+                    <button 
+                        onClick={handleOpenKeySelector}
+                        className="w-full py-2 bg-red-500/10 border border-red-500/40 text-red-500 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-red-500/20 transition-all"
+                    >
+                        Authorize Engine
+                    </button>
+                )}
+                {authError && <p className="text-[8px] text-red-400 font-mono leading-tight">{authError}</p>}
+                <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" className="block text-[8px] text-neutral-600 hover:text-cyan-400 text-right uppercase tracking-tighter">Billing Required</a>
+              </div>
+
+              {/* VAULT MANAGER */}
+              <div className="p-4 bg-cyan-500/5 border border-cyan-500/20 rounded-2xl space-y-3">
+                <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-cyan-500 font-black uppercase tracking-widest flex items-center gap-2">
+                      <div className="w-1.5 h-1.5 rounded-full bg-cyan-500" />
+                      Local Vault
+                    </span>
+                    <span className="text-[10px] text-neutral-300 font-mono font-black">{discovered.length} ENTRIES</span>
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={handleManualSave} className="flex-1 py-2 bg-neutral-900 border border-neutral-800 text-[9px] font-black uppercase tracking-widest rounded-xl hover:text-cyan-400 transition-all">
+                    {vaultSyncing ? 'SYNCING...' : 'SYNC NOW'}
+                  </button>
+                  <button onClick={clearVault} className="px-3 py-2 bg-neutral-900 border border-neutral-800 text-[9px] font-black uppercase tracking-widest rounded-xl hover:text-red-500 transition-all">
+                    PURGE
+                  </button>
+                </div>
+              </div>
+
               <div className="grid grid-cols-2 gap-3 mb-4">
                 <button onClick={() => setScanMode('RANDOM')} className={`py-3 text-[10px] font-black uppercase tracking-widest rounded-2xl border transition-all ${scanMode === 'RANDOM' ? 'bg-cyan-500/20 border-cyan-500 text-cyan-400 shadow-lg' : 'bg-neutral-900 border-neutral-800 text-neutral-600'}`}>Full Sweep</button>
                 <button onClick={() => setScanMode('HVT')} className={`py-3 text-[10px] font-black uppercase tracking-widest rounded-2xl border transition-all ${scanMode === 'HVT' ? 'bg-red-500/20 border-red-500 text-red-400 shadow-lg' : 'bg-neutral-900 border-neutral-800 text-neutral-600'}`}>Target Lock</button>
@@ -385,11 +500,17 @@ export default function App() {
           <div className="grid grid-cols-1 gap-8 overflow-y-auto max-h-[75vh] pr-4 custom-scrollbar pb-20">
             {discovered.length > 0 && (
                 <div className="space-y-8 animate-in fade-in slide-in-from-bottom-10 duration-1000">
-                    <h2 className="text-[14px] font-black text-green-500 uppercase tracking-[0.8em] px-12 flex items-center gap-8">
+                    <div className="flex items-center gap-8 px-12">
                         <span className="h-px bg-green-500/30 flex-1" />
-                        CRYPTO ASSET ACQUISITION SUCCESS
+                        <h2 className="text-[14px] font-black text-green-500 uppercase tracking-[0.8em] whitespace-nowrap">
+                            CRYPTO ASSET ACQUISITION SUCCESS
+                        </h2>
+                        <button onClick={handleManualSave} className="px-4 py-1 rounded bg-green-500/10 border border-green-500/40 text-[9px] font-black text-green-400 uppercase tracking-widest hover:bg-green-500/20 transition-all flex items-center gap-2">
+                           <svg className="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" /></svg>
+                           {vaultSyncing ? 'SYNCED' : 'SAVE TO VAULT'}
+                        </button>
                         <span className="h-px bg-green-500/30 flex-1" />
-                    </h2>
+                    </div>
                     {discovered.map(w => (
                         <WalletCard key={w.id} wallet={w} onReveal={() => toggleReveal(w.id)} isRevealed={!!revealMap[w.id]} onDownload={() => {}} explorerUrl={getExplorerUrl(w.address)} priority />
                     ))}

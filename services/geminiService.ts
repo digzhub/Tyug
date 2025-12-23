@@ -29,6 +29,7 @@ export const auditWalletSetup = async (
   context: string,
   onStream: (text: string) => void
 ): Promise<SecurityReport> => {
+  // FIX: Create a new instance right before making an API call to ensure it always uses the most up-to-date API key.
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   
   const systemInstruction = `
@@ -42,15 +43,27 @@ export const auditWalletSetup = async (
     5. Maintain a hyper-technical, high-stakes atmosphere.
   `;
 
-  const response = await ai.models.generateContent({
-    model: "gemini-3-pro-preview",
-    contents: `QUANTUM ENGINE PEAK LOG: ${context}`,
-    config: {
-      systemInstruction,
-      responseMimeType: "application/json",
-      responseSchema: probabilitySchema
-    },
-  });
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3-pro-preview", // Use pro-preview for complex reasoning tasks.
+      contents: `QUANTUM ENGINE PEAK LOG: ${context}`,
+      config: {
+        systemInstruction,
+        responseMimeType: "application/json",
+        responseSchema: probabilitySchema
+      },
+    });
 
-  return JSON.parse(response.text);
+    if (!response.text) {
+      throw new Error("Empty response from AI engine.");
+    }
+
+    return JSON.parse(response.text);
+  } catch (err: any) {
+    // FIX: Propagate specific permission and missing entity errors back to the caller for key reset.
+    if (err.message?.includes("permission") || err.message?.includes("403") || err.message?.includes("Requested entity was not found")) {
+      throw new Error("PERMISSION_DENIED: Your API key does not have permission for this operation.");
+    }
+    throw err;
+  }
 };
