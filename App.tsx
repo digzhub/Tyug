@@ -7,8 +7,8 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import * as ethers from 'ethers';
 import { WalletEntry, NodeStatus, SecurityReport, BlockInfo } from './types';
-import { auditWalletSetup } from './services/geminiService';
-import { supabase, saveWalletToCloud, syncAllToCloud, fetchWalletsFromCloud } from './services/supabaseService';
+import { auditWalletSetup } from './geminiService';
+import { supabase, saveWalletToCloud, syncAllToCloud, fetchWalletsFromCloud } from './supabaseService';
 
 // Interfaces for Props
 interface WalletCardProps {
