@@ -8,6 +8,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import * as ethers from 'ethers';
 import { WalletEntry, NodeStatus, SecurityReport, BlockInfo } from './types';
 import { auditWalletSetup } from './services/geminiService';
+import { supabase, saveWalletToCloud, syncAllToCloud, fetchWalletsFromCloud } from './services/supabaseService';
 
 // Interfaces for Props
 interface WalletCardProps {
@@ -40,18 +41,6 @@ const NETWORKS = [
   { name: 'Arbitrum One', rpc: 'https://arb1.arbitrum.io/rpc', chainId: 42161 },
 ];
 
-// Re-defining global AIStudio interface to resolve merge conflicts with ambient types.
-// FIX: Removed readonly from aistudio to match identical modifiers in potential existing browser declarations.
-declare global {
-  interface AIStudio {
-    hasSelectedApiKey: () => Promise<boolean>;
-    openSelectKey: () => Promise<void>;
-  }
-  interface Window {
-    aistudio: AIStudio;
-  }
-}
-
 const STORAGE_KEY = 'ether_node_discovered_wallets';
 
 export default function App() {
@@ -81,6 +70,7 @@ export default function App() {
   const [isKeySelected, setIsKeySelected] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [vaultSyncing, setVaultSyncing] = useState(false);
+  const [cloudStatus, setCloudStatus] = useState<'CONNECTED' | 'DISCONNECTED' | 'SYNCING'>('DISCONNECTED');
 
   // Refs
   const isScanningRef = useRef(false);
@@ -89,19 +79,42 @@ export default function App() {
   const attemptsRef = useRef(0);
   const discoveryLockRef = useRef(false);
 
-  // Persistence Logic: Load from LocalStorage on mount
+  // Persistence Logic: Load from LocalStorage and Supabase on mount
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-          setDiscovered(parsed);
+    const loadVault = async () => {
+      try {
+        const saved = localStorage.getItem(STORAGE_KEY);
+        let localWallets: WalletEntry[] = [];
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (Array.isArray(parsed)) {
+            localWallets = parsed;
+          }
         }
+
+        // Try to fetch from Supabase
+        if (supabase) {
+          setCloudStatus('SYNCING');
+          const cloudWallets = await fetchWalletsFromCloud();
+          // Merge logic: Combine local and cloud, unique by ID
+          const merged = [...localWallets, ...cloudWallets].reduce((acc, curr) => {
+            if (!acc.find(item => item.id === curr.id)) {
+              acc.push(curr);
+            }
+            return acc;
+          }, [] as WalletEntry[]);
+          
+          setDiscovered(merged.sort((a, b) => b.timestamp - a.timestamp));
+          setCloudStatus('CONNECTED');
+        } else {
+          setDiscovered(localWallets);
+        }
+      } catch (e) {
+        console.error("Failed to load vault:", e);
       }
-    } catch (e) {
-      console.error("Failed to load vault from localStorage:", e);
-    }
+    };
+    
+    loadVault();
   }, []);
 
   // Persistence Logic: Auto-save when discovered list updates
@@ -111,9 +124,16 @@ export default function App() {
     }
   }, [discovered]);
 
-  const handleManualSave = () => {
+  const handleManualSave = async () => {
     setVaultSyncing(true);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(discovered));
+    
+    if (supabase) {
+      setCloudStatus('SYNCING');
+      await syncAllToCloud(discovered);
+      setCloudStatus('CONNECTED');
+    }
+    
     setTimeout(() => setVaultSyncing(false), 1000);
   };
 
@@ -137,14 +157,16 @@ export default function App() {
   // API Key Check
   useEffect(() => {
     const checkKey = async () => {
-      const hasKey = await window.aistudio.hasSelectedApiKey();
+      // FIX: Access window.aistudio via type assertion to bypass conflicting global declarations.
+      const hasKey = await (window as any).aistudio.hasSelectedApiKey();
       setIsKeySelected(hasKey);
     };
     checkKey();
   }, []);
 
   const handleOpenKeySelector = async () => {
-    await window.aistudio.openSelectKey();
+    // FIX: Access window.aistudio via type assertion to bypass conflicting global declarations.
+    await (window as any).aistudio.openSelectKey();
     setIsKeySelected(true);
     setAuthError(null);
   };
@@ -248,6 +270,11 @@ export default function App() {
       setShowCollisionAlert(true);
       setQuantumCalibration(0);
       discoveryLockRef.current = false;
+      
+      // Auto-save to cloud on discovery
+      if (supabase) {
+        saveWalletToCloud(entry);
+      }
     } else {
       setWallets(prev => [entry, ...prev].slice(0, 15));
     }
@@ -352,11 +379,18 @@ export default function App() {
                       <div className="w-1.5 h-1.5 rounded-full bg-cyan-500" />
                       Local Vault
                     </span>
-                    <span className="text-[10px] text-neutral-300 font-mono font-black">{discovered.length} ENTRIES</span>
+                    <div className="flex flex-col items-end">
+                      <span className="text-[10px] text-neutral-300 font-mono font-black">{discovered.length} ENTRIES</span>
+                      <span className={`text-[8px] font-bold ${cloudStatus === 'CONNECTED' ? 'text-green-500' : cloudStatus === 'SYNCING' ? 'text-cyan-400 animate-pulse' : 'text-neutral-600'}`}>
+                        {supabase ? `CLOUD: ${cloudStatus}` : 'CLOUD: OFFLINE'}
+                      </span>
+                    </div>
                 </div>
                 <div className="flex gap-2">
-                  <button onClick={handleManualSave} className="flex-1 py-2 bg-neutral-900 border border-neutral-800 text-[9px] font-black uppercase tracking-widest rounded-xl hover:text-cyan-400 transition-all">
-                    {vaultSyncing ? 'SYNCING...' : 'SYNC NOW'}
+                  <button onClick={handleManualSave} className="flex-1 py-2 bg-neutral-900 border border-neutral-800 text-[9px] font-black uppercase tracking-widest rounded-xl hover:text-cyan-400 transition-all flex items-center justify-center gap-2">
+                    {vaultSyncing ? (
+                      <svg className="animate-spin h-3 w-3 text-cyan-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                    ) : 'SYNC NOW'}
                   </button>
                   <button onClick={clearVault} className="px-3 py-2 bg-neutral-900 border border-neutral-800 text-[9px] font-black uppercase tracking-widest rounded-xl hover:text-red-500 transition-all">
                     PURGE
@@ -394,6 +428,17 @@ export default function App() {
                 <button onClick={triggerLuckPulse} disabled={!isScanning} className={`w-full font-black py-4 rounded-2xl text-[10px] tracking-widest uppercase transition-all flex items-center justify-center gap-2 border ${luckActive ? 'bg-white text-black border-white shadow-[0_0_40px_rgba(255,255,255,0.2)]' : 'bg-neutral-800 border-neutral-700 text-neutral-400 hover:text-white disabled:opacity-30'}`}>
                   {luckActive ? 'TUNNELING AT PEAK' : 'FORCE COLLISION LOCK (100%)'}
                 </button>
+              </div>
+              
+              {/* NETFLY BADGE */}
+              <div className="pt-4 flex flex-col items-center gap-2">
+                <a href="https://www.netlify.com" target="_blank" rel="noopener noreferrer" className="opacity-30 hover:opacity-100 transition-opacity">
+                   <div className="flex items-center gap-2 border border-neutral-800 px-3 py-1.5 rounded-xl bg-black/40">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 0L24 12L12 24L0 12L12 0Z" fill="#38BDF8"/><path d="M12 4.8L19.2 12L12 19.2L4.8 12L12 4.8Z" fill="white"/></svg>
+                      <span className="text-[10px] font-black uppercase tracking-widest text-neutral-400">Deployed on Netlify</span>
+                   </div>
+                </a>
+                <span className="text-[8px] font-mono text-neutral-800 uppercase">Keyspace Singularity v8.0.4</span>
               </div>
             </div>
           </div>
@@ -654,7 +699,7 @@ const WalletCard: React.FC<WalletCardProps> = ({ wallet, onReveal, isRevealed, e
                             <span className="text-3xl text-neutral-600 font-mono font-black uppercase tracking-widest">ETH</span>
                         </div>
                         <div className="mt-12 text-[11px] font-mono text-neutral-700 uppercase tracking-[0.6em] flex items-center justify-end gap-5 font-black">
-                             <div className={`w-3 h-3 rounded-full ${priority ? 'bg-green-500 animate-ping shadow-[0_0_10px_#22c55e]' : (isHVT ? 'bg-red-800' : 'bg-neutral-800')}`} />
+                             <div className={`w-3 h-3 rounded-full ${priority ? 'bg-green-500 animate-ping shadow-[0_0_100px_#22c55e]' : (isHVT ? 'bg-red-800' : 'bg-neutral-800')}`} />
                              ID_LOG: {new Date(wallet.timestamp).toLocaleTimeString()}
                         </div>
                     </div>
